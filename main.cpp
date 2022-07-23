@@ -1,41 +1,62 @@
-/**
- * happy-fractal - A study of efficient and precise fractal rendering.
- * Copyright (C) 2022  Clyne Sullivan
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+// fractal - OpenCL-accelerated Mandelbrot renderer.
+// Written by Clyne Sullivan.
 
 // If defined, program auto-zooms and measures runtime.
 //#define BENCHMARK
+
+// If defined, split calculations across CPU threads instead of using OpenCL.
+//#define NO_OPENCL
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <execution>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
 
+#include <SDL2/SDL.h>
+
+#ifndef NO_OPENCL
+// Include OpenCL libraries if they're required.
 #define CL_HPP_TARGET_OPENCL_VERSION (300)
 #define CL_HPP_ENABLE_EXCEPTIONS (1)
 #include <CL/opencl.hpp>
-#include <SDL2/SDL.h>
+#else
+// Define helper types and functions to allow direct inclusion of the kernel.
+#include <map>
+
+struct ulong2 {
+    uint64_t lo;
+    uint64_t hi;
+} __attribute__ ((packed));
+struct ulong4 {
+    ulong2 lo;
+    ulong2 hi;
+} __attribute__ ((packed));
+
+#define __kernel
+#define __global
+#define get_global_id(x) (globalIds[std::this_thread::get_id()])
+
+static std::map<std::thread::id, unsigned int> globalIds;
+static std::array<uint32_t, WIN_DIM * WIN_DIM> renderOutput;
+
+#include "opencl/mandelbrot_calc_r128.c"
+#endif
+
+// Sets the window's dimensions. The window is square.
+constexpr static int WIN_DIM = 800;
+
+// For non-OpenCL rendering, the number of threads to split work across.
+constexpr static int THREAD_COUNT = 8;
 
 // The "Float" type determines what data type will store numbers for calculations.
 // Can use native float or double; or, a custom Q4.124 fixed-point data type.
@@ -46,9 +67,6 @@
 using Float = R128;
 
 //using Float = double;
-
-// Sets the window's dimensions. The window is square.
-constexpr static int WIN_DIM = 800;
 
 // Not allowed to calculate less iterations than this.
 constexpr uint32_t MIN_MAX_ITERATIONS = 70;
@@ -72,8 +90,10 @@ public:
     // Joins threads.
     ~MandelbrotState();
 
+#ifndef NO_OPENCL
     // Prepares to use the given OpenCL kernel for calculations.
     void initKernel(cl::Context& clcontext, cl::Program& clprogram, const char *kernelname);
+#endif
 
     Float zoom() const;
 
@@ -96,10 +116,12 @@ private:
     Float m_zoom;
     Complex m_origin;
 
+#ifndef NO_OPENCL
     std::unique_ptr<cl::Kernel> m_cl_kernel;
     std::unique_ptr<cl::CommandQueue> m_cl_queue;
     std::unique_ptr<cl::Buffer> m_cl_input;
     std::unique_ptr<cl::Buffer> m_cl_output;
+#endif
 
     // Enters main loop of calcThread.
     void calcThread();
@@ -114,8 +136,10 @@ static bool done = false;
 static std::atomic_int fps = 0;
 static std::chrono::time_point<std::chrono::high_resolution_clock> clTime;
 
+#ifndef NO_OPENCL
 static cl::Context initCLContext();
 static cl::Program initCLProgram(cl::Context&, const char * const);
+#endif
 static void initSDL(SDL_Window **, SDL_Renderer **, SDL_Texture **);
 static void threadFpsMonitor(MandelbrotState&);
 static void threadEventMonitor(MandelbrotState&);
@@ -129,6 +153,7 @@ int main(int argc, char **argv)
 
     initSDL(&window, &renderer, &MandelbrotTexture);
 
+#ifndef NO_OPENCL
     std::ifstream clSource ("opencl/mandelbrot_calc_r128.c");
     if (!clSource.good())
         throw std::runtime_error("Failed to open OpenCL kernel!");
@@ -141,6 +166,7 @@ int main(int argc, char **argv)
     auto clContext = initCLContext();
     auto clProgram = initCLProgram(clContext, clSourceStr.data());
     Mandelbrot.initKernel(clContext, clProgram, "mandelbrot_calc");
+#endif
 
     // Initiate first calculation so something appears on the screen.
     Mandelbrot.scheduleRecalculation();
@@ -180,7 +206,7 @@ int main(int argc, char **argv)
     return 0;
 }
 
-
+#ifndef NO_OPENCL
 static cl::Platform clplatform;
 static std::vector<cl::Device> cldevices;
 
@@ -206,6 +232,7 @@ cl::Program initCLProgram(cl::Context& clcontext, const char * const source)
         throw err;
     }
 }
+#endif // NO_OPENCL
 
 void initSDL(SDL_Window **window, SDL_Renderer **renderer, SDL_Texture **texture)
 {
@@ -367,6 +394,7 @@ MandelbrotState::~MandelbrotState() {
         m_calc_thread.join();
 }
 
+#ifndef NO_OPENCL
 void MandelbrotState::initKernel(cl::Context& clcontext, cl::Program& clprogram, const char *kernelname)
 {
     m_cl_kernel.reset(new cl::Kernel(clprogram, "mandelbrot_calc"));
@@ -379,6 +407,7 @@ void MandelbrotState::initKernel(cl::Context& clcontext, cl::Program& clprogram,
     m_cl_kernel->setArg(0, *m_cl_input);
     m_cl_kernel->setArg(1, *m_cl_output);
 }
+#endif // NO_OPENCL
 
 Float MandelbrotState::zoom() const {
     return m_zoom;
@@ -406,7 +435,11 @@ bool MandelbrotState::intoTexture(SDL_Texture *texture) {
         void *dst;
         int pitch;
         SDL_LockTexture(texture, nullptr, &dst, &pitch);
+#ifdef NO_OPENCL
+        std::memcpy(dst, renderOutput.data(), renderOutput.size() * sizeof(uint32_t));
+#else
         m_cl_queue->enqueueReadBuffer(*m_cl_output, CL_TRUE, 0, WIN_DIM * WIN_DIM * sizeof(uint32_t), dst);
+#endif
         SDL_UnlockTexture(texture);
 
         std::chrono::duration<double> diff = 
@@ -502,8 +535,23 @@ void MandelbrotState::calculateBitmap()
     m_calcing = true;
 
     clTime = std::chrono::high_resolution_clock::now();
+#ifdef NO_OPENCL
+    std::vector<std::thread> execs;
+
+    for (int t = 0; t < THREAD_COUNT; ++t) {
+        execs.emplace_back([this, t] {
+            for (size_t i = t * renderOutput.size() / THREAD_COUNT; i < (t + 1) * renderOutput.size() / THREAD_COUNT; ++i) {
+                globalIds.insert_or_assign(std::this_thread::get_id(), i);
+                mandelbrot_calc((ulong4 *)points.data(), renderOutput.data(), m_max_iterations);
+            }});
+    }
+
+    for (auto& t : execs)
+        t.join();
+#else
     m_cl_kernel->setArg(2, m_max_iterations);
     m_cl_queue->enqueueWriteBuffer(*m_cl_input, CL_TRUE, 0, points.size() * sizeof(Complex), points.data());
     m_cl_queue->enqueueNDRangeKernel(*m_cl_kernel, cl::NullRange, cl::NDRange(points.size()), cl::NullRange);
+#endif
 }
 
