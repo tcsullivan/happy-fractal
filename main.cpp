@@ -23,7 +23,7 @@
 //#define NO_OPENCL
 
 // If defined, use double floating-point instead of fixed-point.
-#define USE_DOUBLE
+//#define USE_DOUBLE
 
 #include <atomic>
 #include <chrono>

@@ -36,21 +36,23 @@ inline ulong2 r128__umul128(ulong a, ulong b)
     return dst;
 }
 
-inline ulong r128__umul128Hi(ulong a, ulong b)
+inline ulong2 r128__umul128S(ulong a)
 {
     ulong alo = a & 0xFFFFFFFF;
     ulong ahi = a >> 32;
-    ulong blo = b & 0xFFFFFFFF;
-    ulong bhi = b >> 32;
-    ulong p0, p1, p2, p3;
+    ulong p0, p1, p3;
 
-    p0 = alo * blo;
-    p1 = alo * bhi;
-    p2 = ahi * blo;
-    p3 = ahi * bhi;
+    p0 = alo * alo;
+    p1 = alo * ahi;
+    p3 = ahi * ahi;
 
-    ulong carry = ((p1 & 0xFFFFFFFF) + (p2 & 0xFFFFFFFF) + (p0 >> 32)) >> 32;
-    return p3 + ((uint)(p1 >> 32) + (uint)(p2 >> 32)) + carry;
+    ulong2 dst;
+    ulong carry;
+    carry = ((p1 & 0xFFFFFFFF) * 2 + (p0 >> 32)) >> 32;
+
+    dst.lo = p0 + (p1 << 33);
+    dst.hi = p3 + (uint)(p1 >> 31) + carry;
+    return dst;
 }
 
 inline ulong2 r128Shr(const ulong2 src, int amount)
@@ -63,17 +65,16 @@ inline ulong2 r128Shr(const ulong2 src, int amount)
 
 inline ulong2 r128__umul(const ulong2 a, const ulong2 b)
 {
-   ulong2 ahbl, albh, ahbh, sum;
+   ulong2 ahbl, ahbh, sum;
 
-   sum.lo = r128__umul128Hi(a.lo, b.lo);
+   sum.lo = r128__umul128(a.lo, b.lo).hi;
    ahbl = r128__umul128(a.hi, b.lo);
-   albh = r128__umul128(a.lo, b.hi);
    ahbh = r128__umul128(a.hi, b.hi);
 
    ahbh = r128Shr(ahbh, 60);
    sum.hi = ahbh.lo;
    sum = r128Add(sum, ahbl);
-   sum = r128Add(sum, albh);
+   sum = r128Add(sum, ahbl);
 
    return sum;
 }
@@ -87,39 +88,46 @@ inline ulong2 r128Mul(const ulong2 a, const ulong2 b)
    tb = b;
 
    if ((long)ta.hi < 0) {
-      if (ta.lo) {
-         ta.lo = ~ta.lo + 1;
-         ta.hi = ~ta.hi;
-      } else {
-         ta.lo = 0;
-         ta.hi = ~ta.hi + 1;
-      }
+      ta.lo = ~ta.lo + 1;
+      ta.hi = ~ta.hi;
       sign = !sign;
    }
    if ((long)tb.hi < 0) {
-      if (tb.lo) {
-         tb.lo = ~tb.lo + 1;
-         tb.hi = ~tb.hi;
-      } else {
-         tb.lo = 0;
-         tb.hi = ~tb.hi + 1;
-      }
+      tb.lo = ~tb.lo + 1;
+      tb.hi = ~tb.hi;
       sign = !sign;
    }
 
    tc = r128__umul(ta, tb);
 
    if (sign) {
-      if (tc.lo) {
-         tc.lo = ~tc.lo + 1;
-         tc.hi = ~tc.hi;
-      } else {
-         tc.lo = 0;
-         tc.hi = ~tc.hi + 1;
-      }
+      tc.lo = ~tc.lo + 1;
+      tc.hi = ~tc.hi;
    }
 
    return tc;
+}
+
+inline ulong2 r128Square(const ulong2 a)
+{
+   ulong2 ta = a;
+
+   if ((long)ta.hi < 0) {
+      ta.lo = ~ta.lo + 1;
+      ta.hi = ~ta.hi;
+   }
+
+   ulong2 ahbl, ahbh, sum;
+
+   sum.lo = r128__umul128S(ta.lo).hi;
+   ahbl = r128__umul128(ta.hi, ta.lo);
+   ahbh = r128__umul128S(ta.hi);
+
+   ahbh = r128Shr(ahbh, 60);
+   sum.hi = ahbh.lo;
+   sum = r128Add(sum, ahbl);
+   sum = r128Add(sum, ahbl);
+   return sum;
 }
 
 __kernel void mandelbrot_calc(const __global ulong4 *c_pt,
@@ -135,8 +143,8 @@ __kernel void mandelbrot_calc(const __global ulong4 *c_pt,
 
     for (iterations = 0; iterations < max_iterations; ++iterations) {
         tmp = r128Mul(pt.lo, pt.hi);
-        pt.lo = r128Mul(pt.lo, pt.lo);
-        pt.hi = r128Mul(pt.hi, pt.hi);
+        pt.lo = r128Square(pt.lo);
+        pt.hi = r128Square(pt.hi);
 
         const ulong2 sum = r128Add(pt.lo, pt.hi);
         if ((long)sum.hi >= 0x4000000000000000)
