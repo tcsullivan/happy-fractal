@@ -22,6 +22,9 @@
 // If defined, split calculations across CPU threads instead of using OpenCL.
 //#define NO_OPENCL
 
+// If defined, use double floating-point instead of fixed-point.
+#define USE_DOUBLE
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -39,6 +42,15 @@
 
 #include <SDL2/SDL.h>
 
+// Sets the window's dimensions. The window is square.
+constexpr static int WIN_DIM = 800;
+
+#ifdef USE_DOUBLE
+#define FRACTAL_KERNEL "opencl/mandelbrot_calc.c"
+#else
+#define FRACTAL_KERNEL "opencl/mandelbrot_calc_r128.c"
+#endif
+
 #ifndef NO_OPENCL
 // Include OpenCL libraries if they're required.
 #define CL_HPP_TARGET_OPENCL_VERSION (300)
@@ -48,6 +60,21 @@
 // Define helper types and functions to allow direct inclusion of the kernel.
 #include <map>
 
+struct double2 {
+    double x;
+    double y;
+
+    auto& operator+=(const double2& other) {
+        x += other.x;
+        y += other.y;
+        return *this;
+    }
+    auto& operator*=(const double2& other) {
+        x *= other.x;
+        y *= other.y;
+        return *this;
+    }
+} __attribute__ ((packed));
 struct ulong2 {
     uint64_t lo;
     uint64_t hi;
@@ -60,15 +87,17 @@ struct ulong4 {
 #define __kernel
 #define __global
 #define get_global_id(x) (globalIds[std::this_thread::get_id()])
+#ifdef USE_DOUBLE
+#define CALC_SRC_T double2
+#else
+#define CALC_SRC_T ulong4
+#endif
 
 static std::map<std::thread::id, unsigned int> globalIds;
 static std::array<uint32_t, WIN_DIM * WIN_DIM> renderOutput;
 
-#include "opencl/mandelbrot_calc_r128.c"
+#include FRACTAL_KERNEL
 #endif
-
-// Sets the window's dimensions. The window is square.
-constexpr static int WIN_DIM = 800;
 
 // For non-OpenCL rendering, the number of threads to split work across.
 constexpr static int THREAD_COUNT = 8;
@@ -77,11 +106,13 @@ constexpr static int THREAD_COUNT = 8;
 // Can use native float or double; or, a custom Q4.124 fixed-point data type.
 // If fixed point, use "*_r128.c" OpenCL kernel. Otherwise, use regular kernel.
 
+#ifdef USE_DOUBLE
+using Float = double;
+#else
 #define R128_IMPLEMENTATION
 #include "r128.h"
 using Float = R128;
-
-//using Float = double;
+#endif
 
 // Not allowed to calculate less iterations than this.
 constexpr uint32_t MIN_MAX_ITERATIONS = 70;
@@ -169,7 +200,7 @@ int main(int argc, char **argv)
     initSDL(&window, &renderer, &MandelbrotTexture);
 
 #ifndef NO_OPENCL
-    std::ifstream clSource ("opencl/mandelbrot_calc_r128.c");
+    std::ifstream clSource (FRACTAL_KERNEL);
     if (!clSource.good())
         throw std::runtime_error("Failed to open OpenCL kernel!");
 
@@ -557,7 +588,7 @@ void MandelbrotState::calculateBitmap()
         execs.emplace_back([this, t] {
             for (size_t i = t * renderOutput.size() / THREAD_COUNT; i < (t + 1) * renderOutput.size() / THREAD_COUNT; ++i) {
                 globalIds.insert_or_assign(std::this_thread::get_id(), i);
-                mandelbrot_calc((ulong4 *)points.data(), renderOutput.data(), m_max_iterations);
+                mandelbrot_calc((CALC_SRC_T *)points.data(), renderOutput.data(), m_max_iterations);
             }});
     }
 
